@@ -1,0 +1,416 @@
+#!/usr/bin/env python3
+"""
+Mini Pupper Robot Control Script
+Uses the FPC (Flexible Programmable Choreography) API from StanfordQuadruped.
+This replaces the buggy UDP-joystick-based minipupper_control.py.
+
+The FPC API builds a MovementLib (a playlist of choreographed movements)
+and executes them through the direct Controller + HardwareInterface path.
+
+Usage:
+  python3 robot/robot_control.py forward 1.0
+  python3 robot/robot_control.py backward 2.0
+  python3 robot/robot_control.py right 1.5
+  python3 robot/robot_control.py left 0.5
+  python3 robot/robot_control.py cw                  # rotate clockwise 30deg
+  python3 robot/robot_control.py ccw 45              # rotate CCW 45deg
+  python3 robot/robot_control.py look-up
+  python3 robot/robot_control.py look-down
+  python3 robot/robot_control.py look-right
+  python3 robot/robot_control.py look-left
+  python3 robot/robot_control.py raise-body          # ascend 3cm
+  python3 robot/robot_control.py lower-body          # descend 3cm
+  python3 robot/robot_control.py activate            # stand up
+  python3 robot/robot_control.py deactivate          # sit down
+  python3 robot/robot_control.py stop                # return to idle
+  python3 robot/robot_control.py dance               # run a dance sequence
+  python3 robot/robot_control.py greet               # wave a leg
+"""
+
+import sys
+import time
+import argparse
+import numpy as np
+
+# ── Add StanfordQuadruped to path ───────────────────────────────
+sys.path.insert(0, "/home/ubuntu/StanfordQuadruped")
+
+from src.MovementGroup import MovementGroups
+from src.MovementScheme import MovementScheme, LocationStanding, SpeedStanding, AttitudeStanding
+from src.Controller import Controller
+from src.State import State
+from src.Command import Command
+from MangDang.mini_pupper.HardwareInterface import HardwareInterface
+from MangDang.mini_pupper.Config import Configuration
+from MangDang.mini_pupper.display import Display
+from pupper.Kinematics import four_legs_inverse_kinematics
+
+# ── Global hardware objects (reused across runs) ────────────────
+_config = Configuration()
+_hardware = HardwareInterface()
+_controller = Controller(_config, four_legs_inverse_kinematics)
+_state = State()
+_display = Display()
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  MovementLib Builders
+# ═══════════════════════════════════════════════════════════════════
+
+def _build_movement(command: str, duration: float, angle: float, time_acc: float = 0.5):
+    """
+    Build a MovementLib list for a single command.
+
+    Args:
+        command: Movement name (forward, backward, etc.)
+        duration: How long to execute (seconds)
+        angle: Angle for rotation commands (degrees)
+
+    Returns:
+        List of Movement objects (MovementLib)
+    """
+    move = MovementGroups()
+
+    # ── Linear Movement (Level 2: gait_uni) ──
+    # v_x: forward velocity (m/s, + = forward)
+    # v_y: lateral velocity (m/s, + = left)
+    # speed caps: vxcap=0.5, vycap=0.5
+    SPEED = 0.2  # m/s, conservative default
+    ACCEL = 0.3  # seconds to reach speed
+
+    if command in ("forward", "f"):
+        move.gait_uni(v_x=SPEED, v_y=0, time_uni=duration, time_acc=ACCEL)
+
+    elif command in ("backward", "b"):
+        move.gait_uni(v_x=-SPEED, v_y=0, time_uni=duration, time_acc=ACCEL)
+
+    elif command in ("right", "r"):
+        move.gait_uni(v_x=0, v_y=-SPEED, time_uni=duration, time_acc=ACCEL)
+
+    elif command in ("left", "l"):
+        move.gait_uni(v_x=0, v_y=SPEED, time_uni=duration, time_acc=ACCEL)
+
+    # ── Rotation ──
+    elif command in ("cw", "rotate_cw", "turn_right"):
+        move.rotate(angle=(angle if angle else 30))
+
+    elif command in ("ccw", "rotate_ccw", "turn_left"):
+        move.rotate(angle=-(angle if angle else 30))
+
+    # ── Posture (Level 2) ──
+    elif command in ("look-up", "look_up"):
+        move.head_move(pitch_deg=20, yaw_deg=0, time_uni=max(duration, time_acc), time_acc=time_acc)
+
+    elif command in ("look-down", "look_down"):
+        move.head_move(pitch_deg=-20, yaw_deg=0, time_uni=max(duration, time_acc), time_acc=time_acc)
+        # move.stop(time=0.1)
+
+    elif command in ("look-right", "look_right"):
+        move.head_move(pitch_deg=0, yaw_deg=30, time_uni=max(duration, time_acc), time_acc=time_acc)
+
+    elif command in ("look-left", "look_left"):
+        move.head_move(pitch_deg=0, yaw_deg=-30, time_uni=max(duration, time_acc), time_acc=time_acc)
+
+    elif command in ("look-upper-left", "look_upperleft", "upper-left", "upperleft"):
+        move.head_move(pitch_deg=15, yaw_deg=-20, time_uni=max(duration, time_acc), time_acc=time_acc)
+        
+
+    elif command in ("look-upper-right", "look_upperright", "upper-right", "upperright"):
+        move.head_move(pitch_deg=15, yaw_deg=20, time_uni=max(duration, time_acc), time_acc=time_acc)
+        
+
+    elif command in ("raise-body", "raise_body", "raise"):
+        move.height_move(ht=0.03, time_uni=max(duration, time_acc), time_acc=time_acc)
+
+    elif command in ("lower-body", "lower_body", "lower"):
+        move.height_move(ht=-0.03, time_uni=max(duration, time_acc), time_acc=time_acc)
+
+    elif command == "squat":
+        move.height_move(ht=-0.04, time_uni=max(duration, time_acc), time_acc=time_acc)
+        move.stop(time=1.5)
+
+    elif command in ("body-row", "body_row", "roll"):
+        move.body_row(row_deg=angle if angle else 10, time_uni=max(duration if duration else 1.0, time_acc), time_acc=time_acc)
+
+    # ── Standing / Activation ──
+    elif command in ("stop", "idle"):
+        move.stop(time=max(duration, 0.1))
+
+    elif command in ("activate", "init", "stand"):
+        move.height_move(ht=0.03, time_uni=0.5, time_acc=0.5)
+        move.stop(time=0.3)
+
+    elif command in ("deactivate", "sit", "rest"):
+        move.height_move(ht=-0.04, time_uni=0.5, time_acc=0.5)
+        move.stop(time=0.3)
+
+    # ── Sequences ──
+    elif command in ("follow-person", "follow_person", "follow"):
+        # Run the person follower (uses ContinuousController internally)
+        # This just activates and stands - the actual follower runs separately
+        move.gait_uni(v_x=0.05, v_y=0, time_uni=0.5, time_acc=0.5)
+        move.stop(time=0.5)
+
+    elif command == "dance":
+        # move.move_forward()
+        # move.move_backward()
+        # move.move_right()
+        # move.move_left()
+        move.look_up()
+        move.look_down()
+        move.stop()
+        # move.rotate(angle=90)
+        # move.rotate(angle=-90)
+
+    elif command == "disco":
+        move.look_upperright()
+        move.look_upperleft() 
+        # move.look_upperright()
+        # move.look_upperleft() 
+        # move.look_upperright()
+        # move.look_upperleft() 
+        # move.look_upperright()
+        # move.look_upperleft() 
+    
+    elif command == "fall":
+        move.height_move(ht=0.05, time_uni=0.5, time_acc=0.5)
+        # move.foreleg_lift("left", ht=0.03, time_uni=1.0, time_acc=0.5)
+        # move.height_move(ht=-0.02, time_uni=max(duration, 0.5), time_acc=0.5)
+        # move.right(v_x=0, v_y=-0.2, time_uni=duration, time_acc=0.5)
+        move.foreleg_lift("left", ht=0.5, time_uni=1, time_acc=0.05)
+        move.stop(time=0.1)
+        # move.stop(time=0.3)
+        # move.foreleg_lift("right", ht=0.06, time_uni=1.0, time_acc=0.5)
+
+    elif command == "left_kick":
+        """Custom left foreleg kick — stable leg positions via low-level Movements API."""
+        from src.MovementScheme import Movements as _Mv
+        _snap = int(max(time_acc, 0.05) / move.dt)           # fast snap up
+        _hold = int(max(duration, 0.05) / move.dt)           # brief kick hold
+        _kick = _Mv('left_kick')
+        # [FR xyz, FL xyz, BR xyz, BL xyz] — FL (leg 2) extends forward
+        _kick.setTransitionTic(min(_snap, 12))
+        _kick.setInterpolationNumber(max(_hold, 4))
+        _kick.setAllSequence(
+            [
+                [[ 0.06, -0.05, -0.07], [ 0.06, -0.05, -0.07]],   # FR: default
+                [[ 0.16,  0.05, -0.06], [ 0.16,  0.05, -0.06]],   # FL: forward+up ✨
+                [[-0.06, -0.05, -0.07], [-0.06, -0.05, -0.07]],   # BR: default
+                [[-0.08,  0.06, -0.08], [-0.08,  0.06, -0.08]],   # BL: braced
+            ],
+            [[0, 0, 0]],
+            [[0, 0, 0]],
+        )
+        move.MovementLib.append(_kick)
+        # Return to stand (fast)
+        _ret = _Mv('return_stand')
+        _ret.setTransitionTic(min(_snap, 8))
+        _ret.setInterpolationNumber(4)
+        _ret.setAllSequence(move.default_stand, [[0, 0, 0]], [[0, 0, 0]])
+        move.MovementLib.append(_ret)
+
+    elif command == "right_kick":
+        """Custom right foreleg kick — stable leg positions via low-level Movements API."""
+        from src.MovementScheme import Movements as _Mv
+        _snap = int(max(time_acc, 0.05) / move.dt)
+        _hold = int(max(duration, 0.05) / move.dt)
+        _kick = _Mv('right_kick')
+        # [FR xyz, FL xyz, BR xyz, BL xyz] — FR (leg 1) extends forward
+        _kick.setTransitionTic(min(_snap, 12))
+        _kick.setInterpolationNumber(max(_hold, 4))
+        _kick.setAllSequence(
+            [
+                [[ 0.16, -0.05, -0.06], [ 0.16, -0.05, -0.06]],   # FR: forward+up ✨
+                [[ 0.06,  0.05, -0.07], [ 0.06,  0.05, -0.07]],   # FL: default
+                [[-0.08, -0.06, -0.08], [-0.08, -0.06, -0.08]],   # BR: braced
+                [[-0.06,  0.05, -0.07], [-0.06,  0.05, -0.07]],   # BL: default
+            ],
+            [[0, 0, 0]],
+            [[0, 0, 0]],
+        )
+        move.MovementLib.append(_kick)
+        # Return to stand (fast)
+        _ret = _Mv('return_stand')
+        _ret.setTransitionTic(min(_snap, 8))
+        _ret.setInterpolationNumber(4)
+        _ret.setAllSequence(move.default_stand, [[0, 0, 0]], [[0, 0, 0]])
+        move.MovementLib.append(_ret)
+
+    elif command == "backleg_lift":
+        move.backleg_lift("right", ht=0.01, time_uni=time_acc, time_acc=time_acc)
+        move.stop(time=0.1)    
+        
+    elif command == "greet":
+        move.foreleg_lift("right", ht=0.04, time_uni=time_acc, time_acc=time_acc)
+        move.stop(time=0.1)
+        move.foreleg_lift("left", ht=0.05, time_uni=time_acc, time_acc=time_acc)
+        move.stop(time=0.1)
+
+    elif command in ("front_kick", "rear_up"):
+        # Phase 1: Snap front legs up with max height + pitch back
+        move.front_kick(ht=0.06, pitch_deg=20, time_uni=time_acc, time_acc=time_acc)
+        # Phase 2: Return to default standing
+        move.front_kick_to_stand(time_uni=time_acc, time_acc=time_acc)
+        # Phase 3: Settle
+        move.stop(time=0.2)
+
+    # ── Dance Moves (10 choreographed sequences) ────────────────────
+
+    elif command == "headbang":
+        """Rapid body pitch oscillation — looks like human headbanging."""
+        _sub_cycle = time_acc * 2  # 2 sub-moves × time_acc each
+        reps = max(1, int((time_acc + duration) / _sub_cycle)) if duration > 0 else 2
+        for _ in range(reps):
+            move.head_move(pitch_deg=20, yaw_deg=0, time_uni=time_acc, time_acc=time_acc)
+            move.head_move(pitch_deg=-20, yaw_deg=0, time_uni=time_acc, time_acc=time_acc)
+
+    elif command == "bounce":
+        """Body bob — raise on upbeats, lower on downbeats."""
+        _sub_cycle = time_acc * 3  # 2 height moves + 1 stop = 3 × time_acc
+        reps = max(1, int((time_acc + duration) / _sub_cycle)) if duration > 0 else 2
+        for _ in range(reps):
+            move.height_move(ht=0.03, time_uni=time_acc, time_acc=time_acc)
+            move.height_move(ht=-0.03, time_uni=time_acc, time_acc=time_acc)
+            move.stop(time=0.1)
+
+    elif command in ("swagger", "body-roll"):
+        """Groovy body roll — side-to-side tilt."""
+        _sub_cycle = time_acc * 2  # 2 body-row moves = 2 × time_acc
+        reps = max(1, int((time_acc + duration) / _sub_cycle)) if duration > 0 else 2
+        for _ in range(reps):
+            move.body_row(row_deg=15, time_uni=time_acc, time_acc=time_acc)
+            move.body_row(row_deg=-15, time_uni=time_acc, time_acc=time_acc)
+
+    elif command == "spin":
+        """Dramatic rotation — 180 deg spin then 90 deg back."""
+        spin_angle = angle if angle else 180
+        move.rotate(angle=spin_angle)
+        move.stop(time=0.3)
+        move.rotate(angle=-(spin_angle // 2))
+        move.stop(time=0.2)
+
+    elif command == "wave":
+        """Alternating all-4-legs wave — front legs then back legs."""
+        reps = max(1, int(duration / 3.0)) if duration > 0 else 1
+        for _ in range(reps):
+            # Right front
+            move.foreleg_lift(leg_index="right", ht=0.005, time_uni=time_acc, time_acc=time_acc)
+            move.stop(time=0.15)            
+            # Left front
+            move.foreleg_lift(leg_index="left", ht=0.005, time_uni=time_acc, time_acc=time_acc)
+            move.stop(time=0.15)
+            # Right back (diagonal)
+            move.backleg_lift(leg_index="right", ht=0.005, time_uni=time_acc, time_acc=time_acc)
+            move.stop(time=0.15)
+            # Left back (diagonal)
+            move.backleg_lift(leg_index="left", ht=0.005, time_uni=time_acc, time_acc=time_acc)
+            move.stop(time=0.15)
+            
+
+    elif command == "shuffle":
+        """Side-step left/right — classic disco / pop shuffle."""
+        reps = max(1, int(duration / 1.2)) if duration > 0 else 2
+        for _ in range(reps):
+            move.gait_uni(v_x=0, v_y=0.2, time_uni=0.4, time_acc=0.2)
+            move.stop(time=0.15)
+            move.gait_uni(v_x=0, v_y=-0.2, time_uni=0.4, time_acc=0.2)
+            move.stop(time=0.15)
+
+    elif command == "dip":
+        """Slow dramatic lean — look down + tilt + lower body."""
+        move.height_move(ht=-0.02, time_uni=0.5, time_acc=0.3)
+        move.head_move(pitch_deg=-15, yaw_deg=0, time_uni=0.5, time_acc=0.3)
+        move.body_row(row_deg=-15, time_uni=0.6, time_acc=0.4)
+        move.stop(time=0.5)
+        # Return to upright
+        move.head_move(pitch_deg=0, yaw_deg=0, time_uni=0.4, time_acc=0.3)
+        move.body_row(row_deg=0, time_uni=0.4, time_acc=0.3)
+        move.height_move(ht=0.02, time_uni=0.3, time_acc=0.2)
+        move.stop(time=0.2)
+
+    elif command == "nod":
+        """Subtle head nod — small 5 deg pitch oscillation."""
+        _sub_cycle = time_acc * 3  # 2 head moves + 1 stop = 3 × time_acc
+        reps = max(1, int((time_acc + duration) / _sub_cycle)) if duration > 0 else 2
+        for _ in range(reps):
+            move.head_move(pitch_deg=5, yaw_deg=0, time_uni=time_acc, time_acc=time_acc)
+            move.head_move(pitch_deg=-5, yaw_deg=0, time_uni=time_acc, time_acc=time_acc)
+            move.stop(time=0.1)
+
+    elif command == "lean":
+        """Slow controlled body tilt in one direction, then return."""
+        lean_angle = angle if angle else 20
+        stages = max(3, int(abs(lean_angle) / 5))
+        step = lean_angle / stages
+        for s in range(stages, 0, -1):
+            move.body_row(row_deg=s * step, time_uni=time_acc, time_acc=time_acc)
+        move.stop(time=0.4)
+        for s in range(1, stages + 1):
+            move.body_row(row_deg=s * step, time_uni=time_acc, time_acc=time_acc)
+
+    elif command == "flourish":
+        """Multi-axis showstopper: look up + rise + spin + sink + tilt + finish."""
+        move.head_move(pitch_deg=20, yaw_deg=0, time_uni=0.4, time_acc=0.2)
+        move.height_move(ht=0.03, time_uni=0.3, time_acc=0.15)
+        move.rotate(angle=180)
+        move.head_move(pitch_deg=-15, yaw_deg=0, time_uni=0.4, time_acc=0.2)
+        move.height_move(ht=-0.03, time_uni=0.3, time_acc=0.15)
+        move.body_row(row_deg=15, time_uni=0.4, time_acc=0.2)
+        move.body_row(row_deg=0, time_uni=0.3, time_acc=0.15)
+        move.rotate(angle=-30)
+        move.stop(time=0.3)
+
+
+    elif command in ("front-kick", "front_kick"):
+        """Both front legs kick up — snap up, hold, return."""
+        # Phase 1: Lower body slightly, lift right front leg
+        move.height_move(ht=-0.01, time_uni=0.3, time_acc=0.2)
+        move.foreleg_lift(leg_index="right", ht=0.06, time_uni=0.4, time_acc=0.15)
+        move.stop(time=0.1)
+        # Phase 2: Snap left front leg up too
+        move.foreleg_lift(leg_index="left", ht=0.06, time_uni=0.4, time_acc=0.15)
+        move.stop(time=0.3)
+        # Phase 3: Return to standing
+        move.height_move(ht=0.01, time_uni=0.3, time_acc=0.2)
+        move.stop(time=0.2)
+
+    # ── Butt Commands ───────────────────────────────────────────
+    # Stationary rear-focused movements using combined attitude control.
+    # Uses low-level setAttitudeSequence to maintain pitch (butt height)
+    # while executing roll (wiggle) or combined roll+pitch (ellipse).
+
+    elif command == "twerk":
+        """💃 Booty bounce — hip roll (body_row) + height bounce."""
+        _sub_cycle = time_acc * 4  # 4 sub-moves per cycle
+        reps = max(1, int((time_acc + duration) / _sub_cycle)) if duration > 0 else 2
+        for _ in range(reps):
+            # Hip right + bounce up
+            move.body_row(row_deg=18, time_uni=time_acc, time_acc=time_acc)
+            move.height_move(ht=0.01, time_uni=time_acc, time_acc=time_acc)
+            # Hip left + bounce down
+            move.body_row(row_deg=-18, time_uni=time_acc, time_acc=time_acc)
+            move.height_move(ht=-0.01, time_uni=time_acc, time_acc=time_acc)
+
+    elif command == "wiggle":
+        """🍑 Butt wiggle — heads DOWN (pitch=-20, butt UP), then toggles
+        butt between "upper right" (roll right + rear up) and
+        "upper left" (roll left + rear up) using combined attitude."""
+        from src.MovementScheme import Movements as _Mv
+        # Phase 1: Heads down → butt UP
+        move.head_move(pitch_deg=-20, yaw_deg=0, time_uni=time_acc, time_acc=time_acc)
+        # Phase 2: Butt wiggle — toggle upper-right / upper-left via roll
+        _wiggle = _Mv('butt_wiggle')
+        _wiggle.setTransitionTic(8)
+        _wiggle.setInterpolationNumber(6)
+        _wiggle.setLegsSequence(move.default_stand)
+        # Attitude: [roll, pitch, yaw]
+        # pitch=-20 (rear up = heads down), roll alternates ±18
+        _wiggle.setAttitudeSequence(
+            [[18, -20, 0], [-18, -20, 0]],
+            "Multiple", max(1, int(duration / 0.3))
+        )
+        _wiggle.setSpeedSequence([[0, 0, 0]], "Multiple", max(1, int(duration / 0.3)))
+        _wiggle.setTurnSequence([[0, 0, 0]])
+        move.MovementLib.append(_wiggle)
+        move.stop(time=0.15)
+
