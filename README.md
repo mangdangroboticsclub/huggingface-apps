@@ -38,20 +38,20 @@ youtube.com/watch?v=...  --->  yt-dlp  --->  ffmpeg WAV  --->  HF Space (librosa
 
 # 2. Clone this repo
 git clone https://github.com/mangdangroboticsclub/huggingface-apps.git -b Minipupper_Dance
-cd huggingface-apps/
 
 # 3. Update StanfordQuadruped to the matching dance-enabled branch
 cd ~/StanfordQuadruped/
 git remote add hf https://github.com/mangdangroboticsclub/huggingface-apps.git
 git fetch hf Minipupper_Dance_StanfordQuadruped
 git reset --hard FETCH_HEAD
-cd ~/huggingface-apps/
 
 # 4. Install Python dependencies
+cd ..
+cd ~/huggingface-apps/
 pip install yt-dlp
 
 # 5. Run your first dance!
-python3 hf_dance_to_audio.py dance "https://youtu.be/salwJjShv2M" --genre complete
+python3 hf_dance_to_audio.py dance "https://youtu.be/salwJjShv2M"
 ```
 
 > ⚠️ **Not all YouTube videos playable.** Some are region-locked or require a logged-in session. If you hit errors, see [Troubleshooting](#youtube-restrictions) for the fix.
