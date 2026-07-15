@@ -51,7 +51,7 @@ cd ~/huggingface-apps/
 pip install yt-dlp
 
 # 5. Run your first dance!
-python3 hf_dance_to_audio.py dance "https://youtu.be/salwJjShv2M"
+python3 hf_dance_to_audio.py dance "https://youtu.be/Aq5WXmQQooo?si=AzTpH95a65cpANmL"
 ```
 
 > ⚠️ **Not all YouTube videos playable.** Some are region-locked or require a logged-in session. If you hit errors, see [Troubleshooting](#youtube-restrictions) for the fix.
