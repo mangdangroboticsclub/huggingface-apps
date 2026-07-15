@@ -852,7 +852,7 @@ def cmd_dance(url: str, genre_override: str = None, no_activate: bool = True, de
                  "--audio-format", "mp3", "--audio-quality", "0",
                  "-o", f"{DOWNLOAD_DIR}/%(title)s.%(ext)s", "--no-playlist",
                  "--print", "after_move:filename", url],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True, text=True, timeout=300,
             )
         except subprocess.TimeoutExpired:
             return {"ok": False, "error": "Download timed out after 120 seconds."}
